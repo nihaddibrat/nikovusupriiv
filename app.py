@@ -1,11 +1,10 @@
 from flask import Flask, render_template, request, jsonify, send_file
+import subprocess
 import os
-import re
-import requests
-from datetime import datetime
-import tempfile
-from pytube import YouTube
 import json
+import tempfile
+from datetime import datetime
+import re
 
 app = Flask(__name__)
 
@@ -18,91 +17,105 @@ def clean_filename(filename):
     filename = re.sub(r'[-\s]+', '-', filename)
     return filename[:100]
 
-def download_youtube(url, format_type='video'):
-    """YouTube video endir"""
+def get_video_info(url):
+    """yt-dlp ilə video məlumatlarını al"""
     try:
-        yt = YouTube(url)
-        filename = clean_filename(yt.title) + "_" + datetime.now().strftime('%Y%m%d_%H%M%S')
+        cmd = [
+            'yt-dlp',
+            '--dump-json',
+            '--no-playlist',
+            '--no-warnings',
+            '--quiet',
+            '--no-check-certificate',
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            url
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            info = json.loads(result.stdout)
+            return {
+                'title': info.get('title', 'Video'),
+                'duration': info.get('duration', 0),
+                'thumbnail': info.get('thumbnail', ''),
+                'uploader': info.get('uploader', ''),
+                'view_count': info.get('view_count', 0)
+            }
+    except Exception as e:
+        print(f"Info error: {str(e)}")
+    return None
+
+def download_video(url, format_type='video', quality='best'):
+    """yt-dlp ilə video endir"""
+    try:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
         if format_type == 'audio':
-            stream = yt.streams.filter(only_audio=True).first()
-            filename += '.mp3'
+            filename = f"audio_{timestamp}.mp3"
+            filepath = os.path.join(DOWNLOAD_FOLDER, filename)
+            
+            cmd = [
+                'yt-dlp',
+                '-x',  # Extract audio
+                '--audio-format', 'mp3',
+                '--audio-quality', '192K',
+                '--no-playlist',
+                '--no-check-certificate',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '--output', filepath,
+                url
+            ]
         else:
-            stream = yt.streams.get_highest_resolution()
-            filename += '.mp4'
+            filename = f"video_{timestamp}.mp4"
+            filepath = os.path.join(DOWNLOAD_FOLDER, filename)
+            
+            # Quality seçimi
+            if quality == 'best':
+                format_string = 'best[ext=mp4]/best'
+            elif quality == '1080':
+                format_string = 'best[height<=1080][ext=mp4]/best[height<=1080]/best'
+            elif quality == '720':
+                format_string = 'best[height<=720][ext=mp4]/best[height<=720]/best'
+            elif quality == '480':
+                format_string = 'best[height<=480][ext=mp4]/best[height<=480]/best'
+            else:
+                format_string = 'best[height<=360][ext=mp4]/best[height<=360]/best'
+            
+            cmd = [
+                'yt-dlp',
+                '-f', format_string,
+                '--no-playlist',
+                '--no-check-certificate',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '--merge-output-format', 'mp4',
+                '--output', filepath,
+                url
+            ]
         
-        filepath = os.path.join(DOWNLOAD_FOLDER, filename)
-        stream.download(output_path=DOWNLOAD_FOLDER, filename=filename)
+        # Endirmə prosesi
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         
-        return filepath
-    except Exception as e:
-        print(f"YouTube download error: {str(e)}")
+        if result.returncode == 0 and os.path.exists(filepath):
+            return filepath
+        else:
+            print(f"yt-dlp error: {result.stderr}")
+            return None
+            
+    except subprocess.TimeoutExpired:
+        print("Download timeout")
         return None
-
-def download_tiktok(url):
-    """TikTok video endir"""
-    try:
-        # TikTok API endpoint
-        api_url = "https://api.tiklydown.eu.org/api/download/v3"
-        params = {"url": url}
-        
-        response = requests.get(api_url, params=params, timeout=30)
-        data = response.json()
-        
-        if data.get('result') and data['result'].get('video'):
-            video_url = data['result']['video']
-            
-            # Video endir
-            video_response = requests.get(video_url, stream=True)
-            filename = f"tiktok_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            filepath = os.path.join(DOWNLOAD_FOLDER, filename)
-            
-            with open(filepath, 'wb') as f:
-                for chunk in video_response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            return filepath
     except Exception as e:
-        print(f"TikTok download error: {str(e)}")
-    return None
-
-def download_instagram(url):
-    """Instagram video endir"""
-    try:
-        # Instagram API endpoint
-        api_url = "https://api.downloadgram.org/media"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        data = {'url': url}
-        
-        response = requests.post(api_url, data=data, headers=headers, timeout=30)
-        result = response.json()
-        
-        if result.get('media_url'):
-            video_url = result['media_url']
-            
-            # Video endir
-            video_response = requests.get(video_url, stream=True)
-            filename = f"instagram_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            filepath = os.path.join(DOWNLOAD_FOLDER, filename)
-            
-            with open(filepath, 'wb') as f:
-                for chunk in video_response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            return filepath
-    except Exception as e:
-        print(f"Instagram download error: {str(e)}")
-    return None
+        print(f"Download error: {str(e)}")
+        return None
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/api/info', methods=['POST'])
-def get_info():
-    """Video məlumatlarını göndər"""
+def api_get_info():
+    """Video məlumatlarını API endpoint"""
     try:
         data = request.json
         url = data.get('url')
@@ -110,76 +123,54 @@ def get_info():
         if not url:
             return jsonify({'error': 'URL tələb olunur'}), 400
         
-        # Platform təyin et
-        platform = "Video"
-        title = "Video"
+        # Video məlumatlarını al
+        info = get_video_info(url)
         
-        if "youtube.com" in url or "youtu.be" in url:
-            try:
-                yt = YouTube(url)
-                title = yt.title
-                platform = "YouTube"
-            except:
-                title = "YouTube Video"
-                platform = "YouTube"
-        elif "tiktok.com" in url:
-            platform = "TikTok"
-            title = "TikTok Video"
-        elif "instagram.com" in url:
-            platform = "Instagram"
-            title = "Instagram Video"
-        elif "twitter.com" in url or "x.com" in url:
-            platform = "Twitter/X"
-            title = "Twitter Video"
-        
-        return jsonify({
-            'success': True,
-            'info': {
-                'title': title,
-                'duration': 0,
-                'thumbnail': '',
-                'platform': platform
-            }
-        })
+        if info:
+            return jsonify({
+                'success': True,
+                'info': info
+            })
+        else:
+            # Məlumat alınmasa da, sadə cavab göndər
+            return jsonify({
+                'success': True,
+                'info': {
+                    'title': 'Video',
+                    'duration': 0,
+                    'thumbnail': '',
+                    'uploader': '',
+                    'view_count': 0
+                }
+            })
             
     except Exception as e:
-        print(f"Info error: {str(e)}")
+        print(f"API info error: {str(e)}")
         return jsonify({'error': 'Video məlumatları alına bilmədi'}), 400
 
 @app.route('/api/download', methods=['POST'])
-def download():
-    """Video endir"""
+def api_download():
+    """Video endirmə API endpoint"""
     try:
         data = request.json
         url = data.get('url')
         format_type = data.get('format', 'video')
+        quality = data.get('quality', 'best')
         
         if not url:
             return jsonify({'error': 'URL tələb olunur'}), 400
         
-        filepath = None
-        
-        # YouTube
-        if "youtube.com" in url or "youtu.be" in url:
-            filepath = download_youtube(url, format_type)
-        
-        # TikTok
-        elif "tiktok.com" in url:
-            filepath = download_tiktok(url)
-        
-        # Instagram
-        elif "instagram.com" in url:
-            filepath = download_instagram(url)
-        
-        # Twitter - Alternativ API
-        elif "twitter.com" in url or "x.com" in url:
-            # Twitter üçün başqa API lazımdır
-            return jsonify({'error': 'Twitter hazırda dəstəklənmir'}), 400
-        
-        else:
-            return jsonify({'error': 'Dəstəklənməyən platforma'}), 400
+        # Video endir
+        filepath = download_video(url, format_type, quality)
         
         if filepath and os.path.exists(filepath):
+            # Fayl ölçüsünü yoxla
+            file_size = os.path.getsize(filepath)
+            if file_size > 200 * 1024 * 1024:  # 200MB limit
+                os.remove(filepath)
+                return jsonify({'error': 'Fayl çox böyükdür (max 200MB)'}), 413
+            
+            # Faylı göndər
             return send_file(
                 filepath,
                 as_attachment=True,
@@ -187,31 +178,52 @@ def download():
                 mimetype='application/octet-stream'
             )
         else:
-            return jsonify({'error': 'Video endiriləmədi'}), 500
+            return jsonify({'error': 'Video endiriləmədi. Başqa link yoxlayın.'}), 500
             
     except Exception as e:
-        print(f"Download error: {str(e)}")
+        print(f"API download error: {str(e)}")
         return jsonify({'error': 'Server xətası baş verdi'}), 500
 
 @app.route('/api/clean', methods=['POST'])
-def clean_downloads():
+def api_clean():
     """Köhnə faylları təmizlə"""
     try:
-        # Temp qovluğundaki köhnə faylları sil
+        count = 0
         for filename in os.listdir(DOWNLOAD_FOLDER):
-            if filename.startswith(('youtube_', 'tiktok_', 'instagram_', 'download_')):
+            if filename.startswith(('video_', 'audio_')):
                 filepath = os.path.join(DOWNLOAD_FOLDER, filename)
                 try:
                     os.remove(filepath)
+                    count += 1
                 except:
                     pass
-        return jsonify({'success': True})
-    except:
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'cleaned': count})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy'})
+    """Health check"""
+    try:
+        # yt-dlp versiyasını yoxla
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True)
+        version = result.stdout.strip() if result.returncode == 0 else 'unknown'
+        
+        return jsonify({
+            'status': 'healthy',
+            'yt_dlp_version': version,
+            'timestamp': datetime.now().isoformat()
+        })
+    except:
+        return jsonify({'status': 'healthy'})
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'error': 'Səhifə tapılmadı'}), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({'error': 'Server xətası'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
