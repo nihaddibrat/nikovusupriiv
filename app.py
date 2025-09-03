@@ -1,16 +1,16 @@
 import os
 import certifi
-# SSL sertifikat problemini həll et
 os.environ['SSL_CERT_FILE'] = certifi.where()
 os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
 from flask import Flask, render_template, request, jsonify, send_file
-import yt_dlp
+import requests
 import re
 from pathlib import Path
 from datetime import datetime, timedelta
 import threading
 import time
+import json
 
 app = Flask(__name__)
 
@@ -19,34 +19,77 @@ DOWNLOAD_FOLDER = '/tmp/downloads'
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
+# Cobalt API endpoint
+COBALT_API = "https://api.cobalt.tools/api/json"
+
 def clean_filename(filename):
     """Fayl adını təmizlə"""
     filename = re.sub(r'[^\w\s-]', '', filename)
     filename = re.sub(r'[-\s]+', '-', filename)
     return filename[:200]
 
-def get_video_info(url):
-    """Video məlumatlarını al"""
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-        'nocheckcertificate': True,  # SSL sertifikatını yoxlama
-        'no_check_certificate': True,
-        'verbose': False,
-    }
-    
+def get_video_info_cobalt(url):
+    """Cobalt API ilə video məlumatlarını al"""
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return {
-                'title': info.get('title', 'Video'),
-                'duration': info.get('duration', 0),
-                'thumbnail': info.get('thumbnail', ''),
-                'formats': info.get('formats', [])
-            }
+        headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        payload = {
+            "url": url,
+            "vQuality": "720",
+            "aFormat": "mp3",
+            "isAudioOnly": False,
+            "disableMetadata": False
+        }
+        
+        response = requests.post(COBALT_API, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('status') == 'stream' or data.get('status') == 'redirect':
+                # Video məlumatlarını çıxar
+                return {
+                    'success': True,
+                    'title': 'Video',
+                    'download_url': data.get('url'),
+                    'type': 'direct'
+                }
+            elif data.get('status') == 'picker':
+                # Çoxlu format mövcuddur
+                return {
+                    'success': True,
+                    'title': 'Video',
+                    'picker': data.get('picker', []),
+                    'type': 'picker'
+                }
+        return None
     except Exception as e:
-        print(f"Error getting video info: {str(e)}")
+        print(f"Cobalt API error: {str(e)}")
+        return None
+
+def download_from_url(url, filename):
+    """URL-dən faylı endir"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        filepath = os.path.join(DOWNLOAD_FOLDER, filename)
+        
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        return filepath
+    except Exception as e:
+        print(f"Download error: {str(e)}")
         return None
 
 def cleanup_old_files():
@@ -78,13 +121,23 @@ def get_info():
             return jsonify({'error': 'URL tələb olunur'}), 400
         
         # URL doğrulama
-        allowed_domains = ['youtube.com', 'youtu.be', 'tiktok.com', 'twitter.com', 'x.com', 'instagram.com']
+        allowed_domains = ['youtube.com', 'youtu.be', 'tiktok.com', 'twitter.com', 'x.com', 'instagram.com', 'facebook.com', 'vimeo.com']
         if not any(domain in url for domain in allowed_domains):
             return jsonify({'error': 'Dəstəklənməyən platforma'}), 400
         
-        info = get_video_info(url)
-        if info:
-            return jsonify({'success': True, 'info': info})
+        # Cobalt API ilə məlumat al
+        info = get_video_info_cobalt(url)
+        
+        if info and info.get('success'):
+            return jsonify({
+                'success': True, 
+                'info': {
+                    'title': info.get('title', 'Video'),
+                    'duration': 0,
+                    'thumbnail': '',
+                    'formats': []
+                }
+            })
         else:
             return jsonify({'error': 'Video məlumatları alına bilmədi'}), 400
             
@@ -109,82 +162,102 @@ def download():
             return jsonify({'error': 'URL tələb olunur'}), 400
         
         # URL doğrulama
-        allowed_domains = ['youtube.com', 'youtu.be', 'tiktok.com', 'twitter.com', 'x.com', 'instagram.com']
+        allowed_domains = ['youtube.com', 'youtu.be', 'tiktok.com', 'twitter.com', 'x.com', 'instagram.com', 'facebook.com', 'vimeo.com']
         if not any(domain in url for domain in allowed_domains):
             return jsonify({'error': 'Dəstəklənməyən platforma'}), 400
         
-        # Unikal fayl adı yarat
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"download_{timestamp}_{os.urandom(4).hex()}"
+        # Cobalt API ilə download linki al
+        headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
         
-        if format_type == 'audio':
-            # MP3 formatında endir
-            output_template = os.path.join(DOWNLOAD_FOLDER, f"{filename}.%(ext)s")
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': output_template,
-                'quiet': True,
-                'no_warnings': True,
-                'nocheckcertificate': True,
-                'no_check_certificate': True,
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'max_filesize': 100 * 1024 * 1024,  # Max 100MB
-            }
-        else:
-            # Video formatında endir
-            output_template = os.path.join(DOWNLOAD_FOLDER, f"{filename}.%(ext)s")
-            if quality == 'best':
-                format_string = 'best[ext=mp4]/best'
-            else:
-                format_string = f'best[height<={quality}][ext=mp4]/best[height<={quality}]/best'
-            
-            ydl_opts = {
-                'format': format_string,
-                'outtmpl': output_template,
-                'quiet': True,
-                'no_warnings': True,
-                'nocheckcertificate': True,
-                'no_check_certificate': True,
-                'max_filesize': 200 * 1024 * 1024,  # Max 200MB
-            }
+        # Quality mapping
+        quality_map = {
+            'best': 'max',
+            '1080': '1080',
+            '720': '720',
+            '480': '480',
+            '360': '360'
+        }
         
-        # Endirmə prosesi
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        payload = {
+            "url": url,
+            "vQuality": quality_map.get(quality, '720'),
+            "aFormat": "mp3",
+            "isAudioOnly": format_type == 'audio',
+            "disableMetadata": False
+        }
         
-        # Endirilən faylı tap
-        files = list(Path(DOWNLOAD_FOLDER).glob(f"{filename}.*"))
-        if files:
-            temp_file = str(files[0])
+        response = requests.post(COBALT_API, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
             
-            # Fayl ölçüsünü yoxla
-            file_size = os.path.getsize(temp_file)
-            if file_size > 200 * 1024 * 1024:  # 200MB limit
-                os.remove(temp_file)
-                return jsonify({'error': 'Fayl çox böyükdür (max 200MB)'}), 413
-            
-            # Faylı göndər
-            return send_file(
-                temp_file,
-                as_attachment=True,
-                download_name=os.path.basename(temp_file),
-                mimetype='application/octet-stream'
-            )
-        else:
-            return jsonify({'error': 'Fayl endiriləmədi'}), 404
-            
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e)
-        if 'private' in error_msg.lower():
-            return jsonify({'error': 'Bu video məxfidir'}), 403
-        elif 'copyright' in error_msg.lower():
-            return jsonify({'error': 'Müəllif hüququ səbəbindən endirilə bilməz'}), 403
-        else:
-            return jsonify({'error': 'Video endirilə bilmədi'}), 400
+            if result.get('status') == 'stream' or result.get('status') == 'redirect':
+                download_url = result.get('url')
+                
+                if download_url:
+                    # Fayl adını yarat
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    extension = 'mp3' if format_type == 'audio' else 'mp4'
+                    filename = f"download_{timestamp}_{os.urandom(4).hex()}.{extension}"
+                    
+                    # Faylı endir
+                    temp_file = download_from_url(download_url, filename)
+                    
+                    if temp_file and os.path.exists(temp_file):
+                        # Fayl ölçüsünü yoxla
+                        file_size = os.path.getsize(temp_file)
+                        if file_size > 200 * 1024 * 1024:  # 200MB limit
+                            os.remove(temp_file)
+                            return jsonify({'error': 'Fayl çox böyükdür (max 200MB)'}), 413
+                        
+                        # Faylı göndər
+                        return send_file(
+                            temp_file,
+                            as_attachment=True,
+                            download_name=filename,
+                            mimetype='application/octet-stream'
+                        )
+                    else:
+                        return jsonify({'error': 'Fayl endiriləmədi'}), 500
+                        
+            elif result.get('status') == 'picker':
+                # Birinci mövcud formatı seç
+                picker = result.get('picker', [])
+                if picker:
+                    download_url = picker[0].get('url')
+                    
+                    if download_url:
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        extension = 'mp3' if format_type == 'audio' else 'mp4'
+                        filename = f"download_{timestamp}_{os.urandom(4).hex()}.{extension}"
+                        
+                        temp_file = download_from_url(download_url, filename)
+                        
+                        if temp_file and os.path.exists(temp_file):
+                            file_size = os.path.getsize(temp_file)
+                            if file_size > 200 * 1024 * 1024:
+                                os.remove(temp_file)
+                                return jsonify({'error': 'Fayl çox böyükdür (max 200MB)'}), 413
+                            
+                            return send_file(
+                                temp_file,
+                                as_attachment=True,
+                                download_name=filename,
+                                mimetype='application/octet-stream'
+                            )
+                            
+            elif result.get('status') == 'error':
+                error_msg = result.get('text', 'Naməlum xəta')
+                return jsonify({'error': error_msg}), 400
+                
+        return jsonify({'error': 'Video endiriləmədi'}), 500
+        
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'Sorğu müddəti bitdi. Yenidən cəhd edin.'}), 504
     except Exception as e:
         print(f"Download Error: {str(e)}")
         return jsonify({'error': 'Server xətası baş verdi'}), 500
