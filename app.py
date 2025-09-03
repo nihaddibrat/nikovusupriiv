@@ -1,9 +1,13 @@
+import os
+import certifi
+# SSL sertifikat problemini həll et
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+
 from flask import Flask, render_template, request, jsonify, send_file
 import yt_dlp
-import os
 import re
 from pathlib import Path
-import json
 from datetime import datetime, timedelta
 import threading
 import time
@@ -27,7 +31,9 @@ def get_video_info(url):
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
-        'nocheckcertificate': True,
+        'nocheckcertificate': True,  # SSL sertifikatını yoxlama
+        'no_check_certificate': True,
+        'verbose': False,
     }
     
     try:
@@ -120,6 +126,7 @@ def download():
                 'quiet': True,
                 'no_warnings': True,
                 'nocheckcertificate': True,
+                'no_check_certificate': True,
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
@@ -141,6 +148,7 @@ def download():
                 'quiet': True,
                 'no_warnings': True,
                 'nocheckcertificate': True,
+                'no_check_certificate': True,
                 'max_filesize': 200 * 1024 * 1024,  # Max 200MB
             }
         
@@ -221,4 +229,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=port,
         debug=False
-            )
+    )
